@@ -1,0 +1,32 @@
+<RCC>
+    <qresource prefix="/resource">
+        <file>images/GDUTlogo.png</file>
+        <file>images/clearDataImg.png</file>
+        <file>images/curveSetImg.png</file>
+        <file>images/dataAnalysisImg.png</file>
+        <file>images/startImg.png</file>
+        <file>images/stopImg.png</file>
+        <file>images/curveDisplayImg.png</file>
+        <file>images/qImg.png</file>
+        <file>images/sImg.png</file>
+        <file>images/tImg.png</file>
+        <file>images/wImg.png</file>
+        <file>images/realTimePisplayImg.png</file>
+        <file>images/backImg.png</file>
+        <file>images/filePathImg.png</file>
+        <file>images/saveDataImg.png</file>
+        <file>images/viewableImg.png</file>
+        <file>images/xAxisImg.png</file>
+        <file>images/yAxisImg.png</file>
+        <file>images/sampleTimeImg.png</file>
+        <file>images/samplyPeriodImg.png</file>
+        <file>images/biaogeImg.png</file>
+        <file>images/shiyanshujuImg.png</file>
+        <file>images/shujushezhiImg.png</file>
+        <file>images/labRoomName.png</file>
+        <file>images/pImg1.png</file>
+        <file>images/pImg2.png</file>
+        <file>images/tubiao.png</file>
+        <file>images/once.png</file>
+    </qresource>
+</RCC>

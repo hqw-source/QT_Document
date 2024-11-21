@@ -1,0 +1,866 @@
+PROGRAM dev52
+----------------------------------------------------
+-- Creation date: 2024.10.25
+-- Created by: zlx
+----------------------------------------------------
+-- Version: 2.1
+----------------------------------------------------
+-- Function: 完善其他寄存器
+----------------------------------------------------
+-- Last modified: 修改异常报文标志为-1
+-- Last modified by: lxz                             
+----------------------------------------------------
+%COMMENT = '寄存器读写V2.2'
+%ALPHABETIZE
+%NOPAUSESHFT   --忽略shift键影响
+%STACKSIZE = 8000
+%NOLOCKGROUP
+%NOPAUSE = ERROR +COMMAND +TPENABLE
+%ENVIRONMENT uif
+%ENVIRONMENT sysdef
+%ENVIRONMENT memo
+%ENVIRONMENT kclop
+%ENVIRONMENT bynam
+%ENVIRONMENT fdev
+%ENVIRONMENT flbt
+%ENVIRONMENT REGOPE
+%INCLUDE KLEVKEYS
+%INCLUDE KLEVKMSK
+%INCLUDE KLEVCCDF
+%INCLUDE KLIOUOP
+%INCLUDE KLIOTYPS
+
+CONST
+
+    TAGNAME = 'C1:'
+    PORT = 8000   --端口号
+
+    --各类寄存器总数
+    R_NUM  = 200   
+    SR_NUM = 25
+    PR_NUM = 100
+    DI_NUM = 512
+    DO_NUM = 512
+    UI_NUM = 18
+    UO_NUM = 20
+
+    --寄存器种类
+    INT_REG = 1
+    REAL_REG = 2
+    SR_REG = 3
+    PR_REG = 4
+    DI_REG = 5
+    DO_REG = 6
+    UI_REG = 7
+    UO_REG = 8
+
+	--浮点数比较时的精度误差
+	FLOAT_EPSILON = 1e-4
+	
+    READ_MSG_HEAD_LEN = 20
+    WRITE_MSG_HEAD_LEN = 24
+    ERR_MSG_LEN = 28
+
+
+VAR
+    fileVar: FILE
+    status: INTEGER
+    isConnected: BOOLEAN    --连接状态标志
+    loop: BOOLEAN   --控制主循环
+
+    tempString: STRING[254]  --用于清理接收到的不完整报文头，字符串最大254
+    g_arrayIndex: INTEGER   --用于控制发送报文数组的下标
+    g_recvBytesNum: INTEGER  --实际接收到的报文字节数
+    g_recvLength: INTEGER --剩余待读的报文长度
+    g_byteCount: INTEGER  --已经处理的报文字节数 
+
+	--报文头相关的变量
+    g_MsgLen: INTEGER   --报文长度
+    g_commandType: INTEGER    --读写类型
+    g_regType: INTEGER  --寄存器类型
+    g_startNum: INTEGER  --寄存器开始编号
+    g_regCount: INTEGER    --一次性需要操作的寄存器数量/字符数量
+    g_endReg: INTEGER  --最后需要操作的寄存器编号
+
+    g_nSendSum: INTEGER  --整型校验和
+    g_fSendSum: REAL  --浮点型校验和
+    nRecvSum: INTEGER   --接收到的整型校验和
+    fRecvSum: REAL --接收到的浮点型校验和
+
+
+	----------------------用于接收报文的数组--------------------
+	--报文头（长度、读写类型、寄存器类型、起始地址、数量、字节计数）
+	recvHeadArr: ARRAY[7] OF INTEGER	--存储报文头的数组
+
+	---------------------用于发送报文的数组---------------------
+	sendHeadArr: ARRAY[7] OF INTEGER	--用于发送报文头（长度、读写类型、寄存器类型）、起始地址、写入数量
+
+
+	---------------各类寄存器数组------------------
+    --一条报文最多读写57个寄存器+一个校验和，将其设置为60
+    intRArr:ARRAY[60] OF INTEGER    --整型R寄存器数组（读写过程均用到）
+    realRArr:ARRAY[60] OF REAL  --浮点型R寄存器数组（读写过程均用到）
+    SRArr: ARRAY[1] OF STRING[254]  --SR寄存器数组，一次只读写一个SR寄存器
+    PRArr: ARRAY[10] OF XYZWPR  --pr寄存器数组
+
+
+-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+------------------	警报	----------------------------
+
+ROUTINE ALARM(err_id : INTEGER)
+VAR
+    errIdArr: ARRAY[11] OF STRING[60] --用来表示报警类型的数组
+BEGIN
+    errIdArr[1] = '报警代码：1，非法功能码!'
+    errIdArr[2] = '报警代码：2，非法数据地址!'
+    errIdArr[3] = '报警代码：3，非法数据类型!'
+    errIdArr[4] = '报警代码：4，报文长度错误!'
+    errIdArr[5] = '报警代码：5，设备故障!'
+    errIdArr[6] = '报警代码：6，读取寄存器失败!'
+    errIdArr[7] = '报警代码：7，写入寄存器失败!'
+    errIdArr[8] = '报警代码：8，连接中断!'
+    errIdArr[9] = '报警代码：9，读取报文失败或未收到报文!'
+    errIdArr[10] = '报警代码：10，通讯文件打开失败!'
+    errIdArr[11] = '报警代码：11，数据和校验不正确!'
+
+	--WRITE(CHR(128),CHR(137))
+	FORCE_SPMENU(TP_PANEL,SPI_TPUSER,1) --强制显示示教器用户界面
+	WRITE ('*********************************', CR)
+	WRITE ('****         Warning         ****', CR)
+	--WRITE ('*********************************', CR)
+	--WRITE ( CR)
+	--WRITE ('   ## ERROR CODE: ', err_id,' ##', CR)
+
+    WRITE(errIdArr[err_id],CR)
+	--WRITE ('*********************************', CR)
+    --ABORT   --终止程序！！！
+END ALARM
+
+ROUTINE sendErrMessage(errId: INTEGER)
+VAR
+    sum: INTEGER    --异常报文的校验和
+BEGIN
+    sendHeadArr[1] = ERR_MSG_LEN
+    sendHeadArr[2] = g_commandType
+    sendHeadArr[3] = g_regType
+    sendHeadArr[4] = g_startNum
+    sendHeadArr[5] = -1
+    sendHeadArr[6] = errId
+
+    sum = 0
+    FOR g_arrayIndex = 1 TO 6 DO
+        sum = sum + sendHeadArr[g_arrayIndex]
+    ENDFOR
+    sendHeadArr[7] = sum
+
+    FOR g_arrayIndex = 1 TO 7 DO
+        WRITE fileVar(sendHeadArr[g_arrayIndex])
+    ENDFOR
+END sendErrMessage
+
+--command表示读或写命令，当command=82时为读R，当command=87时为写W
+--浮点型的startNum是接着整型R的，例如61表示浮点型R的第一个
+--功能：双向更新R寄存器的值
+ROUTINE readRMsg
+VAR
+	readR_Index: INTEGER	--用于控制R寄存器数组的下标
+
+	--读取R寄存器用到的变量
+    r_flag: BOOLEAN
+    intValue: INTEGER
+    realValue: REAL
+BEGIN
+    
+    g_endReg = g_startNum + g_regCount - 1
+    g_MsgLen = READ_MSG_HEAD_LEN + g_regCount*4 + 4   --回复报文长度
+    --WRITE('返回的字节长度为：',g_MsgLen,CR)
+    sendHeadArr[1] = g_MsgLen 
+    --读写过程返回的报文的读写类型和寄存器类型是一样的
+    sendHeadArr[2] = g_commandType  --回复读写类型
+    sendHeadArr[3] = g_regType  --回复寄存器类型 
+    sendHeadArr[4] = g_startNum --回复起始地址
+    sendHeadArr[5] = g_regCount   --回复操作的寄存器数量
+    --表示整型R寄存器
+    --计算和校验
+    IF g_regType = 1 THEN
+        g_nSendSum = 0   
+        FOR g_arrayIndex = 1 TO 5 DO
+            g_nSendSum =  g_nSendSum + sendHeadArr[g_arrayIndex]
+        ENDFOR
+        g_arrayIndex = 1
+        FOR readR_Index = g_startNum TO g_endReg DO
+            GET_REG(readR_Index, r_flag,intValue,realValue,status)
+            IF status = 0 THEN
+                IF r_flag THEN
+                    intRArr[g_arrayIndex] = ROUND(realValue)
+                ELSE
+                    intRArr[g_arrayIndex] = intValue
+                ENDIF
+                g_nSendSum = g_nSendSum + intRArr[g_arrayIndex]
+                g_arrayIndex = g_arrayIndex + 1
+            ELSE
+                ALARM(6)
+                sendErrMessage(6)
+                RETURN
+            ENDIF
+        ENDFOR
+
+        --发送报文头
+        FOR g_arrayIndex=1 TO 5 DO
+            WRITE fileVar(sendHeadArr[g_arrayIndex])
+        ENDFOR
+        --发送寄存器值
+        FOR g_arrayIndex = 1 TO g_regCount DO
+            WRITE fileVar(intRArr[g_arrayIndex])
+        ENDFOR
+        --发送和校验
+        WRITE fileVar(g_nSendSum)
+
+    --表示浮点型R寄存器
+    ELSE    -- g_regType= 2 THEN
+        g_fSendSum = 0.0
+        FOR g_arrayIndex = 1 TO 5 DO
+            g_fSendSum =  g_fSendSum + sendHeadArr[g_arrayIndex]
+        ENDFOR
+        g_arrayIndex = 1
+        FOR readR_Index = g_startNum TO g_endReg DO
+            GET_REG(readR_Index, r_flag,intValue,realValue,status)
+            IF status = 0 THEN
+                IF NOT r_flag THEN
+                    realRArr[g_arrayIndex] = intValue*1.0
+                ELSE
+                    realRArr[g_arrayIndex] = realValue
+                ENDIF
+                g_fSendSum = g_fSendSum+realRArr[g_arrayIndex]
+                g_arrayIndex = g_arrayIndex + 1
+            ELSE
+                ALARM(6)
+                sendErrMessage(6)
+                RETURN
+            ENDIF
+        ENDFOR
+        --发送报文头
+        FOR g_arrayIndex=1 TO 5 DO
+            WRITE fileVar(sendHeadArr[g_arrayIndex])
+        ENDFOR
+        --发送寄存器值
+        FOR g_arrayIndex = 1 TO g_regCount DO
+            WRITE fileVar(realRArr[g_arrayIndex])
+        ENDFOR
+        --发送和校验
+        WRITE fileVar(g_fSendSum)
+    ENDIF
+END readRMsg
+
+ROUTINE readSRMsg
+VAR
+    strLen: INTEGER
+BEGIN
+    --计算报文长度
+    GET_STR_REG(g_startNum,SRArr[1],status)
+    IF status = 0 THEN
+        strLen = STR_LEN(SRArr[1])
+        g_MsgLen = READ_MSG_HEAD_LEN + strLen + 4 + 1
+    ELSE
+        ALARM(6)
+        sendErrMessage(6)
+        RETURN
+    ENDIF
+
+    sendHeadArr[1] = g_MsgLen   --报文长度
+    sendHeadArr[2] = g_commandType  --回复读写类型
+    sendHeadArr[3] = g_regType  --回复寄存器类型 
+    sendHeadArr[4] = g_startNum --回复起始地址
+    sendHeadArr[5] = strLen + 1   --SR寄存器的字符数（回复的第一位表示字符报文长度）
+
+    --计算报文头的和
+    g_nSendSum = 0   
+    FOR g_arrayIndex = 1 TO 5 DO
+        g_nSendSum =  g_nSendSum + sendHeadArr[g_arrayIndex]
+    ENDFOR
+    FOR g_arrayIndex = 1 TO strLen DO
+        g_nSendSum =  g_nSendSum + ORD(SRArr[1],g_arrayIndex)
+    ENDFOR
+	g_nSendSum =  g_nSendSum + strLen   --由于发送的报文会多带一个字节表示字符个数，所以需要在加上
+    --发送报文头
+    FOR g_arrayIndex=1 TO 5 DO
+        WRITE fileVar(sendHeadArr[g_arrayIndex])
+    ENDFOR
+    --发送寄存器值
+    WRITE fileVar(SRArr[1])
+    --发送和校验
+    WRITE fileVar(g_nSendSum)    
+END readSRMsg
+
+ROUTINE readPRMsg
+VAR
+    getPos:XYZWPR   --笛卡尔坐标位置变量
+    readPR_Index: INTEGER    --表示PR寄存器号
+BEGIN
+
+    g_endReg = g_startNum + g_regCount - 1
+    g_MsgLen = READ_MSG_HEAD_LEN + g_regCount*24 + 4 --回复报文长度
+    --WRITE('返回的字节长度为：',g_MsgLen,CR)
+    sendHeadArr[1] = g_MsgLen 
+    --读写过程返回的报文的读写类型和寄存器类型是一样的
+    sendHeadArr[2] = g_commandType  --回复读写类型
+    sendHeadArr[3] = g_regType  --回复寄存器类型 
+    sendHeadArr[4] = g_startNum --回复起始地址
+    sendHeadArr[5] = g_regCount   --回复操作的寄存器数量
+  
+    --计算报文头的和
+    g_fSendSum = 0.0  --校验和
+    FOR g_arrayIndex = 1 TO 5 DO
+        g_fSendSum =  g_fSendSum + sendHeadArr[g_arrayIndex]
+    ENDFOR
+    g_arrayIndex = 1
+    FOR readPR_Index = g_startNum TO g_endReg DO
+        PRArr[g_arrayIndex] = GET_POS_REG(readPR_Index,status)   --获取pr寄存器值
+        IF status = 0 THEN
+            --计算校验和
+            g_fSendSum = g_fSendSum + 
+                           PRArr[g_arrayIndex].x + PRArr[g_arrayIndex].y + PRArr[g_arrayIndex].z +
+                           PRArr[g_arrayIndex].w + PRArr[g_arrayIndex].p + PRArr[g_arrayIndex].r
+            g_arrayIndex = g_arrayIndex + 1
+        ELSE
+            ALARM(6)
+            sendErrMessage(6)
+            RETURN
+        ENDIF
+    ENDFOR
+
+    --发送报文头
+    FOR g_arrayIndex=1 TO 5 DO
+        WRITE fileVar(sendHeadArr[g_arrayIndex])
+    ENDFOR
+    --发送寄存器值
+    FOR g_arrayIndex = 1 TO g_regCount DO
+        WRITE fileVar(PRArr[g_arrayIndex].x)
+        WRITE fileVar(PRArr[g_arrayIndex].y)
+        WRITE fileVar(PRArr[g_arrayIndex].z)
+        WRITE fileVar(PRArr[g_arrayIndex].w)
+        WRITE fileVar(PRArr[g_arrayIndex].p)
+        WRITE fileVar(PRArr[g_arrayIndex].r)
+    ENDFOR
+    --发送校验和
+    WRITE fileVar(g_fSendSum)
+END readPRMsg
+
+ROUTINE writeRMsg
+VAR
+	readR_Index: INTEGER	--用于控制R寄存器数组的下标
+BEGIN
+    --返回的写报文
+    g_endReg = g_startNum + g_regCount - 1
+    sendHeadArr[1] = WRITE_MSG_HEAD_LEN  --回复写的报文长度
+    sendHeadArr[2] = g_commandType
+    sendHeadArr[3] = g_regType
+    sendHeadArr[4] = g_startNum      --回复写的起始地址
+    sendHeadArr[5] = g_regCount   --回复写入的寄存器数量
+    sendHeadArr[6] = 0  --回复校验和，以发送的头报文数组最后一个来存储校验和
+    FOR g_arrayIndex = 1 TO 5 DO
+        sendHeadArr[6] =  sendHeadArr[6] + sendHeadArr[g_arrayIndex]    
+    ENDFOR
+    
+    --开始写入寄存器值
+    g_arrayIndex = 1
+    --表示整型R寄存器
+    IF g_regType= 1 THEN
+        FOR readR_Index = g_startNum TO g_endReg DO
+            SET_INT_REG(readR_Index,intRArr[g_arrayIndex],status)
+            IF status <> 0 THEN
+                ALARM(7)
+                sendErrMessage(7)
+                RETURN
+            ENDIF
+            g_arrayIndex = g_arrayIndex + 1   
+        ENDFOR
+    --表示浮点R寄存器
+    ELSE    --g_regType= 2 THEN
+        FOR readR_Index = g_startNum TO g_endReg DO
+            SET_REAL_REG(readR_Index,realRArr[g_arrayIndex],status)
+            IF status <> 0 THEN
+                ALARM(7)
+                sendErrMessage(7)
+                RETURN
+            ENDIF
+            g_arrayIndex = g_arrayIndex + 1
+        ENDFOR
+    ENDIF
+    --发送写的回复报文
+    FOR g_arrayIndex=1 TO 6 DO
+        WRITE fileVar(sendHeadArr[g_arrayIndex])
+    ENDFOR
+END writeRMsg
+
+ROUTINE writeSRMsg
+BEGIN
+    --返回的写SR报文
+    sendHeadArr[1] = WRITE_MSG_HEAD_LEN  --回复写的报文长度
+    sendHeadArr[2] = g_commandType
+    sendHeadArr[3] = g_regType
+    sendHeadArr[4] = g_startNum      --回复写的起始地址
+    sendHeadArr[5] = 1   --回复写入的寄存器数量,固定为1
+    sendHeadArr[6] = 0  --回复校验和，以发送的头报文数组最后一个来存储校验和
+    FOR g_arrayIndex = 1 TO 5 DO
+        sendHeadArr[6] =  sendHeadArr[6] + sendHeadArr[g_arrayIndex]    
+    ENDFOR
+
+    --开始写入寄存器值
+    SET_STR_REG(g_startNum, SRArr[1], status)
+    IF status <> 0 THEN
+        ALARM(7)
+        sendErrMessage(7)
+        RETURN
+    ENDIF
+
+    --发送写SR的回复报文
+    FOR g_arrayIndex=1 TO 6 DO
+        WRITE fileVar(sendHeadArr[g_arrayIndex])
+    ENDFOR
+END writeSRMsg
+
+
+ROUTINE writePRMsg
+VAR
+	readPR_Index: INTEGER	--用于控制PR寄存器数组的下标
+BEGIN
+    --返回的写PR报文
+    g_endReg = g_startNum + g_regCount - 1
+    sendHeadArr[1] = WRITE_MSG_HEAD_LEN  --回复写的报文长度
+    sendHeadArr[2] = g_commandType
+    sendHeadArr[3] = g_regType
+    sendHeadArr[4] = g_startNum      --回复写的起始地址
+    sendHeadArr[5] = g_regCount   --回复写入的寄存器数量
+    sendHeadArr[6] = 0  --回复校验和，以发送的头报文数组最后一个来存储校验和
+    FOR g_arrayIndex = 1 TO 5 DO
+        sendHeadArr[6] =  sendHeadArr[6] + sendHeadArr[g_arrayIndex]    
+    ENDFOR
+    
+    --开始写入寄存器值
+    g_arrayIndex = 1
+    FOR readPR_Index = g_startNum TO g_endReg DO
+        --是否需要考虑关节坐标系？现固定为正交坐标系的坐标
+        SET_POS_REG(readPR_Index,PRArr[g_arrayIndex],status)
+            IF status <> 0 THEN
+                ALARM(7)
+                sendErrMessage(7)
+                RETURN
+            ENDIF
+            g_arrayIndex = g_arrayIndex + 1   
+    ENDFOR
+    --发送写PR的回复报文
+    FOR g_arrayIndex=1 TO 6 DO
+        WRITE fileVar(sendHeadArr[g_arrayIndex])
+    ENDFOR
+END writePRMsg
+
+
+--------------------------------------------------------------
+--------------------------------------------------------------
+----------------------发送报文---------------------------------
+ROUTINE sendMessage
+BEGIN
+    IF g_byteCount>1 THEN --只有接收到了字节才继续
+
+        IF g_commandType = 82 THEN       --读过程需要返回的报文
+            SELECT g_regType OF --判断寄存器类型
+            CASE(1):    --整型R
+                readRMsg
+            CASE(2):    --浮点R
+                readRMsg
+            CASE(3):    --SR
+                readSRMsg
+            CASE(4):    --PR
+                readPRMsg
+            CASE(5):    --DI
+                --
+            CASE(6):    --DO
+                --
+            CASE(7):    --UI
+                --
+            CASE(8):    --UO
+                --
+            ENDSELECT
+        ELSE                        --写过程需要返回的报文
+            SELECT g_regType OF --判断寄存器类型
+            CASE(1):    --整型R
+                writeRMsg
+            CASE(2):    --浮点R
+                writeRMsg
+            CASE(3):    --SR
+                writeSRMsg
+            CASE(4):    --PR
+                writePRMsg
+            CASE(5):    --DI
+
+            CASE(6):    --DO
+
+            CASE(7):    --UI
+
+            CASE(8):    --UO
+
+            ENDSELECT
+        ENDIF
+    ENDIF
+	--WRITE(CR)
+END sendMessage
+-------------------------------------------------------------
+-----------*********************************-----------------
+-----------------------报文合法性检测-------------------------
+ROUTINE checkMessage: BOOLEAN
+VAR
+    regNumArr: ARRAY[8] OF INTEGER --用来表示寄存器的种类数组
+BEGIN
+    regNumArr[1] = R_NUM
+    regNumArr[2] = R_NUM
+    regNumArr[3] = SR_NUM
+    regNumArr[4] = PR_NUM
+    regNumArr[5] = DI_NUM
+    regNumArr[6] = DO_NUM
+    regNumArr[7] = UI_NUM
+    regNumArr[8] = UO_NUM
+    
+    --1、检查报文长度
+    IF g_recvBytesNum < recvHeadArr[1] THEN  
+        sendErrMessage(4)
+        ALARM(4)
+        BYTES_AHEAD(fileVar, g_recvBytesNum, status)
+        READ fileVar(tempString::g_recvBytesNum)  --清除缓存区的报文
+        RETURN  (FALSE)
+    ENDIF
+    --2、检查读写类型
+    IF (g_commandType <> 82) AND (g_commandType <> 87) THEN
+        sendErrMessage(1)
+        ALARM(1)
+        BYTES_AHEAD(fileVar, g_recvBytesNum, status)
+        READ fileVar(tempString::g_recvBytesNum)  --清除缓存区的报文
+        RETURN (FALSE)
+    ENDIF
+    
+    --3、检查寄存器类型
+    IF (g_regType < 0) AND (g_regType > 8) THEN
+        sendErrMessage(1)
+        ALARM(1)
+        BYTES_AHEAD(fileVar, g_recvBytesNum, status)
+        READ fileVar(tempString::g_recvBytesNum)  --清除缓存区的报文
+        RETURN  (FALSE)
+    ENDIF
+    
+    --4、检查寄存器地址
+    IF g_regType = SR_REG THEN
+        IF g_regCount > 240 THEN
+            ALARM(2)
+            BYTES_AHEAD(fileVar, g_recvBytesNum, status)
+            READ fileVar(tempString::g_recvBytesNum)  --清除缓存区的报文
+            RETURN  (FALSE)
+        ENDIF
+    ENDIF
+    g_endReg = g_startNum + g_regCount - 1  --最后需要操作的寄存器
+    IF g_endReg > regNumArr[g_regType] THEN
+        sendErrMessage(2)
+        ALARM(2)
+        BYTES_AHEAD(fileVar, g_recvBytesNum, status)
+        READ fileVar(tempString::g_recvBytesNum)  --清除缓存区的报文
+        RETURN  (FALSE)
+    ENDIF
+    RETURN (TRUE)
+END checkMessage
+
+
+
+------------------------------------------
+-------上位机发来的写报文的校验和-----------
+------------------------------------------
+ROUTINE CheckSum: BOOLEAN
+
+VAR
+   intSum: INTEGER
+   realSum: REAL
+   sumIndex: INTEGER   
+BEGIN
+    --WRITE(CR)
+    intSum = g_recvBytesNum + g_commandType + g_regType + g_startNum + g_regCount
+    realSum = 0.0
+    sumIndex = g_regCount+1
+    SELECT g_regType OF
+        CASE(1):    --整型R寄存器
+            FOR g_arrayIndex=1 TO g_regCount DO
+                intSum = intSum + intRArr[g_arrayIndex]
+            ENDFOR
+            WRITE('计算得到的整型R和为：',intSum,CR)
+            WRITE('接收到的整型和为：',intRArr[sumIndex],CR)
+            IF intSum <> intRArr[sumIndex] THEN
+                RETURN (FALSE)
+            ENDIF
+            RETURN (TRUE)
+        CASE(2):    --浮点型R寄存器
+            FOR g_arrayIndex=1 TO g_regCount DO
+                realSum = realSum + realRArr[g_arrayIndex]
+            ENDFOR
+            realSum = realSum + intSum
+            WRITE('计算得到的浮点型和为：',realSum,CR)
+            WRITE('接收到的浮点型和为：',realRArr[sumIndex],CR)
+            IF realSum - realRArr[sumIndex]>FLOAT_EPSILON THEN
+                RETURN (FALSE)
+            ENDIF
+            RETURN (TRUE)
+        CASE(3):    --SR寄存器
+            FOR g_arrayIndex=1 TO STR_LEN(SRArr[1]) DO
+                intSum = intSum + ORD(SRArr[1],g_arrayIndex)
+            ENDFOR
+            WRITE('计算得到的整型R和为：',intSum,CR)
+            WRITE('接收到的整型和为：',nRecvSum,CR)
+            IF intSum <> nRecvSum THEN
+                RETURN (FALSE)
+            ENDIF
+            RETURN (TRUE)
+        CASE(4):    --PR寄存器
+            FOR g_arrayIndex=1 TO g_regCount DO
+                --计算校验和
+                realSum = realSum + 
+                            PRArr[g_arrayIndex].x + PRArr[g_arrayIndex].y + PRArr[g_arrayIndex].z +
+                            PRArr[g_arrayIndex].w + PRArr[g_arrayIndex].p + PRArr[g_arrayIndex].r
+            ENDFOR
+            realSum = realSum + intSum
+            WRITE('计算得到的PR寄存器和为：',realSum,CR)
+            WRITE('接收到的PR寄存器和为：',fRecvSum,CR)
+            IF realSum-fRecvSum >FLOAT_EPSILON THEN
+                RETURN (FALSE)
+            ENDIF
+            RETURN (TRUE)
+        CASE(5):
+
+
+        CASE(6):
+
+
+        CASE(7):
+
+
+        CASE(8):
+
+    ENDSELECT
+END CheckSum
+-------------------------------------------------------------
+-----------*********************************-----------------
+--子函数RecvWriteMessage，用于接收上位机发来的写报文并解析
+ROUTINE RecvWriteMessage
+BEGIN
+    SELECT g_regType OF
+        CASE(1):    --收到写整型R
+            FOR g_arrayIndex = 1 TO g_regCount+1 DO
+                READ fileVar(intRArr[g_arrayIndex])
+                WRITE(intRArr[g_arrayIndex],' ')   --测试用
+                g_byteCount=g_byteCount+4
+                g_recvLength=g_recvLength-4
+            ENDFOR
+            WRITE('接收到的整型R校验和为：',intRArr[g_regCount+1],CR)
+        CASE(2):    --收到写浮点R
+            WRITE('接收到的浮点R数据为：')
+            FOR g_arrayIndex = 1 TO g_regCount+1 DO
+                READ fileVar(realRArr[g_arrayIndex])
+                WRITE(realRArr[g_arrayIndex],' ')   --测试用
+                g_byteCount=g_byteCount+4
+                g_recvLength=g_recvLength-4
+            ENDFOR
+            WRITE('接收到的浮点R校验和为：',realRArr[g_regCount+1],CR)
+        CASE(3):    --收到写SR
+            READ fileVar(SRArr[1]::g_regCount)
+            READ fileVar(nRecvSum)
+            WRITE('接收到的SR值为：',SRArr[1],CR)
+            WRITE('接收到的SR校验和为：',nRecvSum,CR)
+        CASE(4):    --收到写PR
+            WRITE('接收到的PR数据为：')
+            FOR g_arrayIndex = 1 TO g_regCount DO
+                READ fileVar(PRArr[g_arrayIndex].x)
+                READ fileVar(PRArr[g_arrayIndex].y)
+                READ fileVar(PRArr[g_arrayIndex].z)
+                READ fileVar(PRArr[g_arrayIndex].w)
+                READ fileVar(PRArr[g_arrayIndex].p)
+                READ fileVar(PRArr[g_arrayIndex].r)
+                WRITE(PRArr[g_arrayIndex],CR)   --测试用
+                g_byteCount=g_byteCount+4
+                g_recvLength=g_recvLength-4
+            ENDFOR
+            READ fileVar(fRecvSum)
+            WRITE('接收到的PR校验和为：',fRecvSum,CR)
+        CASE(5):
+
+
+        CASE(6):
+
+
+        CASE(7):
+
+
+        CASE(8):
+
+    ENDSELECT
+
+END RecvWriteMessage
+
+ROUTINE CheckConnection: BOOLEAN
+BEGIN
+    -- 尝试读取文件来检测连接状态
+    --READ fileVar(tempString)
+    WRITE('进入CheckConnection函数中……',CR)
+    status = IO_STATUS(fileVar)  --判断连接状态
+    IF (status <> 0) THEN
+    	WRITE('已断连',CR)
+        ALARM(8)    --给出报警，连接中断
+        CLR_IO_STAT(fileVar)  
+        CLOSE FILE filevar
+        RETURN (FALSE)
+    ENDIF
+    RETURN (TRUE)
+END CheckConnection
+
+
+------------------------------------------------
+------尝试连接
+------------------------------------------------
+ROUTINE tryConnect(tagName: STRING): BOOLEAN
+VAR
+    connectionStatus: BOOLEAN   --连接状态
+BEGIN
+	MSG_DISCO(tagName, status) -- 先断开上一次的连接
+	connectionStatus = FALSE
+    --MSG_CONNECT(tagName,status) --尝试连接
+    WHILE NOT connectionStatus DO
+    	MSG_CONNECT(tagName,status) --尝试连接
+    	IF status = 0 THEN
+            connectionStatus = TRUE
+            WRITE('连接成功!!!', CR)
+            RETURN (TRUE)
+        ENDIF
+        WRITE('连接失败！1S后重连……', CR)
+    	DELAY 1000	-- 延迟1S后重试
+    ENDWHILE
+END tryConnect
+
+-------------------------------------------------------------
+-----------*********************************-----------------
+--子函数recvMessage，用于接收报文并解析
+ROUTINE recvMessage: BOOLEAN
+VAR
+    recvLoop: BOOLEAN
+    sum: INTEGER    --检查上位机发来的读报文校验和
+    isMessageRight: BOOLEAN --报文是否正确
+    isDataRight: BOOLEAN    --数据是否正确
+    
+BEGIN
+    --如果断连了，再使用BYTES_AHEAD(fileVar, g_recvBytesNum, status)，则g_recvBytesNum为未初始化状态
+	BYTES_AHEAD(fileVar, g_recvBytesNum, status)    --会不会未初始化就说明连接有问题，没有报文发来会是0？
+    IF (UNINIT(g_recvBytesNum)) THEN   --如果n_bytes未初始化，则说明连接有问题    
+        g_recvBytesNum=0
+        CLR_IO_STAT(fileVar)
+        CLOSE FILE filevar
+        ALARM(8)
+        RETURN (FALSE)
+    ENDIF
+    IF (g_recvBytesNum>0) AND (status=0) THEN
+        WRITE('接收到的报文长度为：',g_recvBytesNum,CR)
+        IF (g_recvBytesNum >= 20) THEN   --第一次检查报文长度
+            g_recvLength = g_recvBytesNum
+            --先接收报文头！！！
+            --（长度、读写类型、寄存器类型、起始地址、数量）
+            WRITE('报文头：')
+            g_arrayIndex=1
+            WHILE (g_byteCount<20) DO
+                READ fileVar(recvHeadArr[g_arrayIndex])
+                WRITE(recvHeadArr[g_arrayIndex],' ')
+                g_arrayIndex=g_arrayIndex+1
+                g_byteCount=g_byteCount+4
+                g_recvLength=g_recvLength-4
+            ENDWHILE
+            --WRITE(CR)
+            g_commandType = recvHeadArr[2]  --读写命令
+            g_regType = recvHeadArr[3]  --寄存器类型
+            g_startNum = recvHeadArr[4]  --寄存器开始编号
+            g_regCount = recvHeadArr[5]    --一次需要操作的寄存器数量
+
+            --报文检查
+            WRITE('检查读写类型',g_commandType,CR)
+            isMessageRight = checkMessage
+
+            IF isMessageRight THEN
+                --读写也分成函数
+                ------------------------------上位机发来的读报文---------------------------------
+                IF (g_commandType = 82) THEN
+                    --处理发来的读报文的校验和
+                    sum = g_recvBytesNum + g_commandType + g_regType + g_startNum + g_regCount
+                    READ fileVar(recvHeadArr[6])    --将读报文的校验和放到头报文数组recvHeadArr[6]里
+                    g_byteCount=g_byteCount+4
+                    g_recvLength=g_recvLength-4
+    
+                    IF sum <> recvHeadArr[6] THEN
+                        ALARM(11)
+                        sendErrMessage(11)
+                        g_byteCount = 1
+                    ENDIF
+                    RETURN (TRUE)  
+                ENDIF
+                ------------------------------上位机发来的写报文----------------------------------   
+                --接收上位机发来的写报文
+                RecvWriteMessage    --接收到的写报文,及其处理
+                isDataRight = CheckSum
+                IF NOT isDataRight THEN
+                    ALARM(11)
+                    sendErrMessage(11)
+                    g_byteCount = 1
+                ENDIF
+                RETURN (TRUE)
+            ENDIF
+        ELSE
+            RETURN (FALSE)
+        ENDIF
+    ELSE
+        --ALARM(9)    --读取报文失败
+        RETURN (TRUE)
+    ENDIF
+END recvMessage
+
+----------------------------------------------------
+-- BEGIN dev3 主程序                           
+----------------------------------------------------
+BEGIN
+	WRITE(CHR(128),CHR(137))
+	isConnected = FALSE
+	WRITE('开始连接……',CR)
+	
+    isConnected = tryConnect(TAGNAME)	--尝试连接
+    
+	WHILE isConnected DO
+        --WRITE('连接成功，进入文件操作', CR)
+	    SET_FILE_ATR(fileVar, ATR_UF)	--设置文件以二进制传输
+		SET_FILE_ATR(fileVar, ATR_IA)	--设置文件为交互式读写，无CR立即输出
+		--SET_FILE_ATR(fileVar, ATR_REVERSE)	--设置文件以相反的顺序读写，还未测试可行性
+		SET_FILE_ATR(fileVar, ATR_READAHD, 2)	--设置预读缓冲区大小为256字节，提升读取效率
+		
+		--WRITE('连接成功，进入文件操作', CR)
+	    OPEN FILE  fileVar( 'rw',TAGNAME)
+        status = IO_STATUS(fileVar)       
+      	IF status = 0 THEN
+      		loop = TRUE
+      		WHILE loop DO
+                --WRITE(CHR(128),CHR(137))
+	      		g_byteCount=1
+	      		loop = recvMessage
+	        	sendMessage
+                --WRITE('读写完成，延时0.5s，开始下一次读写',CR)
+      		    DELAY 500
+      		ENDWHILE
+      	ELSE	--连接失败后开始重连
+            ALARM(10)
+            isConnected = CheckConnection
+            IF NOT isConnected THEN
+                -- 尝试重新连接
+                WRITE('重连中...', CR)
+                isConnected = tryConnect(TAGNAME)
+                --WRITE('重连完成？？？', CR)
+            ENDIF
+      	ENDIF
+    ENDWHILE    
+END dev52

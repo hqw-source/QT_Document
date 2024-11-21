@@ -1,0 +1,10 @@
+<RCC>
+    <qresource prefix="/Img">
+        <file>source/dakaiwenjianImg.png</file>
+        <file>source/kongzhiImg.png</file>
+        <file>source/quxianImg.png</file>
+        <file>source/wenjianImg.png</file>
+        <file>source/wenjianmingImg.png</file>
+        <file>source/zhuansuImg.png</file>
+    </qresource>
+</RCC>

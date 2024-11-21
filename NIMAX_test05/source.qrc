@@ -1,0 +1,26 @@
+<RCC>
+    <qresource prefix="/">
+        <file>source/dakaiwenjianImg.png</file>
+        <file>source/kongzhiImg.png</file>
+        <file>source/quxianImg.png</file>
+        <file>source/wenjianImg.png</file>
+        <file>source/wenjianmingImg.png</file>
+        <file>source/zhuansuImg.png</file>
+        <file>source/bianmaqiImg.png</file>
+        <file>source/cidianImg.png</file>
+        <file>source/dianganImg.png</file>
+        <file>source/guangdianImg.png</file>
+        <file>source/huoerImg.png</file>
+        <file>source/GDUTlogo.png</file>
+        <file>source/labRoomName.png</file>
+        <file>source/signalImg.png</file>
+        <file>source/dingshiImg.png</file>
+        <file>source/kaishibaocunImg.png</file>
+        <file>source/realTimeImg.png</file>
+        <file>source/baocunjinduImg.png</file>
+        <file>source/caiyangshijianImg.png</file>
+        <file>source/shezhishijianImg.png</file>
+        <file>source/labRoomName.docx</file>
+        <file>source/logo.ico</file>
+    </qresource>
+</RCC>
